@@ -1,0 +1,312 @@
+# OPA Gatekeeper Policies for CIS Kubernetes Benchmark Compliance
+# These policies enforce security best practices across all clusters
+
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequiredsecuritycontext
+  annotations:
+    description: "Requires pods to have security context with specific settings"
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequiredSecurityContext
+      validation:
+        type: object
+        properties:
+          runAsNonRoot:
+            type: boolean
+          runAsUser:
+            type: integer
+          runAsGroup:
+            type: integer
+          readOnlyRootFilesystem:
+            type: boolean
+          allowPrivilegeEscalation:
+            type: boolean
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequiredsecuritycontext
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.securityContext.runAsNonRoot
+          msg := "Container must run as non-root user"
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          container.securityContext.allowPrivilegeEscalation
+          msg := "Container must not allow privilege escalation"
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.securityContext.readOnlyRootFilesystem
+          msg := "Container must use read-only root filesystem"
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          container.securityContext.runAsUser == 0
+          msg := "Container must not run as root (UID 0)"
+        }
+
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- security-context-constraint.yaml
+- network-policy-constraint.yaml
+- resource-limits-constraint.yaml
+- image-policy-constraint.yaml
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequirednetworkpolicy
+  annotations:
+    description: "Requires namespaces to have network policies"
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequiredNetworkPolicy
+      validation:
+        type: object
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequirednetworkpolicy
+
+        violation[{"msg": msg}] {
+          input.review.kind.kind == "Namespace"
+          input.review.operation == "CREATE"
+          namespace := input.review.object.metadata.name
+          not has_network_policy(namespace)
+          msg := sprintf("Namespace '%v' must have a NetworkPolicy", [namespace])
+        }
+
+        has_network_policy(namespace) {
+          # This would need to be implemented with external data
+          # For now, we'll allow creation and check separately
+          true
+        }
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequiredresourcelimits
+  annotations:
+    description: "Requires containers to have resource limits and requests"
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequiredResourceLimits
+      validation:
+        type: object
+        properties:
+          cpu:
+            type: string
+          memory:
+            type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequiredresourcelimits
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.resources.limits.cpu
+          msg := "Container must have CPU limits"
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.resources.limits.memory
+          msg := "Container must have memory limits"
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.resources.requests.cpu
+          msg := "Container must have CPU requests"
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.resources.requests.memory
+          msg := "Container must have memory requests"
+        }
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequiredlabels
+  annotations:
+    description: "Requires resources to have specific labels"
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequiredLabels
+      validation:
+        type: object
+        properties:
+          labels:
+            type: array
+            items:
+              type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequiredlabels
+
+        violation[{"msg": msg}] {
+          required := input.parameters.labels
+          provided := input.review.object.metadata.labels
+          missing := required[_]
+          not provided[missing]
+          msg := sprintf("Missing required label: %v", [missing])
+        }
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8sblockprivilegedcontainers
+  annotations:
+    description: "Blocks privileged containers"
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sBlockPrivilegedContainers
+      validation:
+        type: object
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sblockprivilegedcontainers
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          container.securityContext.privileged
+          msg := "Privileged containers are not allowed"
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.initContainers[_]
+          container.securityContext.privileged
+          msg := "Privileged init containers are not allowed"
+        }
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8sblockloadbalancer
+  annotations:
+    description: "Blocks LoadBalancer services in specific namespaces"
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sBlockLoadBalancer
+      validation:
+        type: object
+        properties:
+          excludedNamespaces:
+            type: array
+            items:
+              type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sblockloadbalancer
+
+        violation[{"msg": msg}] {
+          input.review.kind.kind == "Service"
+          input.review.object.spec.type == "LoadBalancer"
+          namespace := input.review.object.metadata.namespace
+          not namespace_excluded(namespace)
+          msg := "LoadBalancer services are not allowed in this namespace"
+        }
+
+        namespace_excluded(namespace) {
+          excluded := input.parameters.excludedNamespaces[_]
+          excluded == namespace
+        }
+
+---
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: k8srequiredhealthchecks
+  annotations:
+    description: "Requires containers to have health checks"
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRequiredHealthChecks
+      validation:
+        type: object
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srequiredhealthchecks
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.livenessProbe
+          msg := "Container must have a liveness probe"
+        }
+
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not container.readinessProbe
+          msg := "Container must have a readiness probe"
+        }
+
+---
+# Constraint instances that apply the templates
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+- constraint-security-context.yaml
+- constraint-resource-limits.yaml
+- constraint-required-labels.yaml
+- constraint-block-privileged.yaml
+- constraint-health-checks.yaml
+
+---
+apiVersion: config.gatekeeper.sh/v1alpha1
+kind: Config
+metadata:
+  name: config
+  namespace: gatekeeper-system
+spec:
+  match:
+    - excludedNamespaces: ["kube-system", "kube-public", "kube-node-lease", "gatekeeper-system"]
+      processes: ["*"]
+  validation:
+    traces:
+      - user:
+          kind:
+            group: "*"
+            version: "*"
+            kind: "*"
+      - kind:
+          group: "*"
+          version: "*"
+          kind: "*" 
